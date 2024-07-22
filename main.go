@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/context"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
@@ -36,65 +37,77 @@ func parseArgs() {
 	esServers = strings.Split(esServersStr, ",")
 }
 
-func pingOnce(dest string) pingResult {
+func pingOnce(ctx context.Context, dest string) pingResult {
 	// ping the server
-	c, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
-	if err != nil {
-		log.Fatalf("failed to listen err: %s", err)
-	}
-	defer c.Close()
+	for {
+		select {
+		case <-ctx.Done():
+			return pingResult{
+				MsgType: ipv4.ICMPTypeTimeExceeded,
+				Latency: time.Duration(0),
+			}
+		default:
+			c, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+			if err != nil {
+				log.Fatalf("failed to listen err: %s", err)
+			}
+			defer c.Close()
 
-	wm := icmp.Message{
-		Type: ipv4.ICMPTypeEcho,
-		Code: 0,
-		Body: &icmp.Echo{
-			ID:   os.Getegid() & 0xffff,
-			Seq:  1,
-			Data: []byte("HELLO-R-U-THERE"),
-		},
-	}
-	wb, err := wm.Marshal(nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+			wm := icmp.Message{
+				Type: ipv4.ICMPTypeEcho,
+				Code: 0,
+				Body: &icmp.Echo{
+					ID:   os.Getegid() & 0xffff,
+					Seq:  1,
+					Data: []byte("HELLO-R-U-THERE"),
+				},
+			}
+			wb, err := wm.Marshal(nil)
+			if err != nil {
+				log.Fatal(err)
+			}
 
-	startTime := time.Now()
-	if _, err := c.WriteTo(wb, &net.IPAddr{IP: net.ParseIP(dest)}); err != nil {
-		log.Fatalf("WriteTo err: %s", err)
-	}
+			startTime := time.Now()
+			if _, err := c.WriteTo(wb, &net.IPAddr{IP: net.ParseIP(dest)}); err != nil {
+				log.Fatalf("WriteTo err: %s", err)
+			}
 
-	rb := make([]byte, 1500)
-	n, peer, err := c.ReadFrom(rb)
-	if err != nil {
-		log.Fatal(err)
-	}
-	endTime := time.Now()
+			rb := make([]byte, 1500)
+			n, peer, err := c.ReadFrom(rb)
+			if err != nil {
+				log.Fatal(err)
+			}
+			endTime := time.Now()
 
-	rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), rb[:n])
-	if err != nil {
-		log.Fatal(err)
-	}
+			rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), rb[:n])
+			if err != nil {
+				log.Fatal(err)
+			}
 
-	switch rm.Type {
-	case ipv4.ICMPTypeEchoReply:
-		log.Printf("got reply from %v", peer)
-	case ipv4.ICMPTypeDestinationUnreachable:
-		log.Printf("destination unreachable")
-	case ipv4.ICMPTypeTimeExceeded:
-		log.Printf("timed out")
-	default:
-		log.Printf("got %+v; want echo reply", rm)
-	}
-	return pingResult{
-		MsgType: rm.Type,
-		Latency: endTime.Sub(startTime),
+			switch rm.Type {
+			case ipv4.ICMPTypeEchoReply:
+				log.Printf("got reply from %v", peer)
+			case ipv4.ICMPTypeDestinationUnreachable:
+				log.Printf("destination unreachable")
+			case ipv4.ICMPTypeTimeExceeded:
+				log.Printf("timed out")
+			default:
+				log.Printf("got %+v; want echo reply", rm)
+			}
+			return pingResult{
+				MsgType: rm.Type,
+				Latency: endTime.Sub(startTime),
+			}
+		}
 	}
 }
 
 func pingX(dest string, repeat int) []pingResult {
 	results := []pingResult{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(3*repeat))
+	defer cancel()
 	for i := 0; i < repeat; i++ {
-		result := pingOnce(dest)
+		result := pingOnce(ctx, dest)
 		results = append(results, result)
 	}
 	return results
