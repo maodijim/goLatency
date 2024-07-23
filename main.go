@@ -152,6 +152,7 @@ func oneRound() {
 func main() {
 	parseArgs()
 	ticker := time.NewTicker(time.Second * time.Duration(pingInterval))
+	oneRound()
 	for {
 		select {
 		case <-ticker.C:
