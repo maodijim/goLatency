@@ -39,66 +39,74 @@ func parseArgs() {
 
 func pingOnce(ctx context.Context, dest string) pingResult {
 	// ping the server
-	for {
-		select {
-		case <-ctx.Done():
-			return pingResult{
-				MsgType: ipv4.ICMPTypeTimeExceeded,
-				Latency: time.Duration(0),
-			}
-		default:
-			c, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
-			if err != nil {
-				log.Fatalf("failed to listen err: %s", err)
-			}
-			defer c.Close()
+	ch := make(chan pingResult)
 
-			wm := icmp.Message{
-				Type: ipv4.ICMPTypeEcho,
-				Code: 0,
-				Body: &icmp.Echo{
-					ID:   os.Getegid() & 0xffff,
-					Seq:  1,
-					Data: []byte("HELLO-R-U-THERE"),
-				},
-			}
-			wb, err := wm.Marshal(nil)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			startTime := time.Now()
-			if _, err := c.WriteTo(wb, &net.IPAddr{IP: net.ParseIP(dest)}); err != nil {
-				log.Fatalf("WriteTo err: %s", err)
-			}
-
-			rb := make([]byte, 1500)
-			n, peer, err := c.ReadFrom(rb)
-			if err != nil {
-				log.Fatal(err)
-			}
-			endTime := time.Now()
-
-			rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), rb[:n])
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			switch rm.Type {
-			case ipv4.ICMPTypeEchoReply:
-				log.Printf("got reply from %v", peer)
-			case ipv4.ICMPTypeDestinationUnreachable:
-				log.Printf("destination unreachable")
-			case ipv4.ICMPTypeTimeExceeded:
-				log.Printf("timed out")
-			default:
-				log.Printf("got %+v; want echo reply", rm)
-			}
-			return pingResult{
-				MsgType: rm.Type,
-				Latency: endTime.Sub(startTime),
-			}
+	go func() {
+		c, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+		if err != nil {
+			log.Fatalf("failed to listen err: %s", err)
 		}
+		defer c.Close()
+
+		wm := icmp.Message{
+			Type: ipv4.ICMPTypeEcho,
+			Code: 0,
+			Body: &icmp.Echo{
+				ID:   os.Getegid() & 0xffff,
+				Seq:  1,
+				Data: []byte("HELLO-R-U-THERE"),
+			},
+		}
+		wb, err := wm.Marshal(nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		startTime := time.Now()
+		if _, err := c.WriteTo(wb, &net.IPAddr{IP: net.ParseIP(dest)}); err != nil {
+			log.Printf("WriteTo err: %s", err)
+			return // return to avoid deadlock
+		}
+
+		rb := make([]byte, 1500)
+		n, peer, err := c.ReadFrom(rb)
+		if err != nil {
+			log.Print(err)
+			return // return to avoid deadlock
+		}
+		endTime := time.Now()
+
+		rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), rb[:n])
+		if err != nil {
+			log.Print(err)
+			return // return to avoid deadlock
+		}
+
+		switch rm.Type {
+		case ipv4.ICMPTypeEchoReply:
+			log.Printf("got reply from %v", peer)
+		case ipv4.ICMPTypeDestinationUnreachable:
+			log.Printf("destination unreachable")
+		case ipv4.ICMPTypeTimeExceeded:
+			log.Printf("timed out")
+		default:
+			log.Printf("got %+v; want echo reply", rm)
+		}
+		ch <- pingResult{
+			MsgType: rm.Type,
+			Latency: endTime.Sub(startTime),
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Print("ping timeout")
+		return pingResult{
+			MsgType: ipv4.ICMPTypeTimeExceeded,
+			Latency: time.Duration(0),
+		}
+	case res := <-ch:
+		return res
 	}
 }
 
@@ -143,8 +151,11 @@ func oneRound() {
 
 func main() {
 	parseArgs()
+	ticker := time.NewTicker(time.Second * time.Duration(pingInterval))
 	for {
-		oneRound()
-		time.Sleep(time.Duration(pingInterval) * time.Second)
+		select {
+		case <-ticker.C:
+			oneRound()
+		}
 	}
 }
